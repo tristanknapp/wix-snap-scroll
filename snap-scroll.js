@@ -1,21 +1,32 @@
-console.log("[Wix Snap Scroll v5] file executing");
+console.log("[Wix Snap Scroll v6] file executing");
 
 (() => {
     "use strict";
 
     const CONFIG = {
         sectionSelector: '[data-testid="section-container"]',
+
+        /*
+         * Use the section number shown in the console.
+         *
+         * Example:
+         * If the FAQ is logged as "Section 8",
+         * keep this as [8].
+         */
+        freeScrollSectionNumbers: [8],
+
         wheelThreshold: 30,
         cooldown: 950,
+        edgeTolerance: 12,
         debug: true
     };
 
-    // Stop the same script initializing twice in one window.
     if (window.__WIX_SNAP_SCROLL_INITIALIZED__) {
-        console.log("[Wix Snap Scroll v5] duplicate instance ignored");
+        console.log("[Wix Snap Scroll v6] duplicate instance ignored");
         return;
     }
 
+    let sections = [];
     let snapPoints = [];
     let locked = false;
     let accumulatedDelta = 0;
@@ -27,7 +38,7 @@ console.log("[Wix Snap Scroll v5] file executing");
 
     function log(...args) {
         if (CONFIG.debug) {
-            console.log("[Wix Snap Scroll v5]", ...args);
+            console.log("[Wix Snap Scroll v6]", ...args);
         }
     }
 
@@ -35,9 +46,7 @@ console.log("[Wix Snap Scroll v5] file executing");
         return Array.from(
             document.querySelectorAll(CONFIG.sectionSelector)
         ).filter((section) => {
-            const rect = section.getBoundingClientRect();
-
-            return rect.height > 0;
+            return section.getBoundingClientRect().height > 0;
         });
     }
 
@@ -45,8 +54,14 @@ console.log("[Wix Snap Scroll v5] file executing");
         return element.getBoundingClientRect().top + window.scrollY;
     }
 
+    function isFreeScrollSection(sectionIndex) {
+        // Convert the zero-based JavaScript index to a human-readable number.
+        return CONFIG.freeScrollSectionNumbers.includes(sectionIndex + 1);
+    }
+
     function buildSnapPoints() {
-        const sections = getSections();
+        sections = getSections();
+
         const viewportHeight = window.innerHeight;
         const points = [];
 
@@ -54,26 +69,31 @@ console.log("[Wix Snap Scroll v5] file executing");
             const rect = section.getBoundingClientRect();
             const sectionTop = getAbsoluteTop(section);
             const sectionHeight = rect.height;
+            const freeScroll = isFreeScrollSection(sectionIndex);
 
             /*
-             * Examples:
-             * 100vh section -> 1 snap point
-             * 200vh section -> 2 snap points
-             * 300vh section -> 3 snap points
+             * Free-scroll sections only receive a snap point at their top.
+             * Other tall sections are divided into viewport-sized parts.
              */
-            const partCount = Math.max(
-                1,
-                Math.round(sectionHeight / viewportHeight)
-            );
+            const partCount = freeScroll
+                ? 1
+                : Math.max(
+                    1,
+                    Math.round(sectionHeight / viewportHeight)
+                );
 
             log(
                 `Section ${sectionIndex + 1}:`,
                 `height=${Math.round(sectionHeight)}px,`,
-                `viewport=${viewportHeight}px,`,
-                `parts=${partCount}`
+                `parts=${partCount},`,
+                freeScroll ? "FREE SCROLL" : "SNAP"
             );
 
-            for (let partIndex = 0; partIndex < partCount; partIndex++) {
+            for (
+                let partIndex = 0;
+                partIndex < partCount;
+                partIndex++
+            ) {
                 const maximumTop = Math.max(
                     sectionTop,
                     sectionTop + sectionHeight - viewportHeight
@@ -82,10 +102,9 @@ console.log("[Wix Snap Scroll v5] file executing");
                 const requestedTop =
                     sectionTop + viewportHeight * partIndex;
 
-                const pointTop = Math.min(
-                    requestedTop,
-                    maximumTop
-                );
+                const pointTop = freeScroll
+                    ? sectionTop
+                    : Math.min(requestedTop, maximumTop);
 
                 points.push({
                     top: Math.round(pointTop),
@@ -95,7 +114,6 @@ console.log("[Wix Snap Scroll v5] file executing");
             }
         });
 
-        // Sort and remove nearly identical positions.
         snapPoints = points
             .sort((a, b) => a.top - b.top)
             .filter((point, index, list) => {
@@ -111,16 +129,62 @@ console.log("[Wix Snap Scroll v5] file executing");
             `${sections.length} Wix sections`
         );
 
-        log(
-            snapPoints.map((point, index) => ({
-                snapPoint: index + 1,
-                y: point.top,
-                wixSection: point.sectionIndex + 1,
-                part: point.partIndex + 1
-            }))
-        );
-
         return sections.length;
+    }
+
+    function getSectionAtViewportCenter() {
+        const viewportCenter = window.innerHeight / 2;
+
+        for (let index = 0; index < sections.length; index++) {
+            const rect = sections[index].getBoundingClientRect();
+
+            if (
+                rect.top <= viewportCenter &&
+                rect.bottom >= viewportCenter
+            ) {
+                return {
+                    element: sections[index],
+                    index,
+                    rect
+                };
+            }
+        }
+
+        return null;
+    }
+
+    function shouldAllowNativeScroll(direction) {
+        const current = getSectionAtViewportCenter();
+
+        if (!current) return false;
+        if (!isFreeScrollSection(current.index)) return false;
+
+        const rect = current.rect;
+        const tolerance = CONFIG.edgeTolerance;
+
+        /*
+         * Scrolling down is allowed until the bottom of the FAQ
+         * reaches the bottom of the viewport.
+         */
+        if (
+            direction > 0 &&
+            rect.bottom > window.innerHeight + tolerance
+        ) {
+            return true;
+        }
+
+        /*
+         * Scrolling up is allowed until the top of the FAQ
+         * reaches the top of the viewport.
+         */
+        if (
+            direction < 0 &&
+            rect.top < -tolerance
+        ) {
+            return true;
+        }
+
+        return false;
     }
 
     function getClosestSnapIndex() {
@@ -141,23 +205,46 @@ console.log("[Wix Snap Scroll v5] file executing");
         return closestIndex;
     }
 
+    function getTargetIndex(direction) {
+        const currentY = window.scrollY;
+        const tolerance = 20;
+
+        if (direction > 0) {
+            /*
+             * Find the first snap point below the current position.
+             */
+            return snapPoints.findIndex(
+                (point) => point.top > currentY + tolerance
+            );
+        }
+
+        /*
+         * Find the last snap point above the current position.
+         */
+        for (
+            let index = snapPoints.length - 1;
+            index >= 0;
+            index--
+        ) {
+            if (snapPoints[index].top < currentY - tolerance) {
+                return index;
+            }
+        }
+
+        return -1;
+    }
+
     function scrollToPoint(index) {
         if (locked || snapPoints.length === 0) return;
+        if (index < 0 || index >= snapPoints.length) return;
 
-        const targetIndex = Math.max(
-            0,
-            Math.min(index, snapPoints.length - 1)
-        );
-
-        const target = snapPoints[targetIndex];
-
-        if (!target) return;
+        const target = snapPoints[index];
 
         locked = true;
         accumulatedDelta = 0;
 
         log(
-            `Scrolling to snap ${targetIndex + 1}:`,
+            `Scrolling to snap ${index + 1}:`,
             `section=${target.sectionIndex + 1},`,
             `part=${target.partIndex + 1},`,
             `y=${target.top}`
@@ -177,15 +264,15 @@ console.log("[Wix Snap Scroll v5] file executing");
     function move(direction) {
         buildSnapPoints();
 
-        const currentIndex = getClosestSnapIndex();
-        const targetIndex = currentIndex + direction;
+        let targetIndex = getTargetIndex(direction);
 
-        if (
-            targetIndex < 0 ||
-            targetIndex >= snapPoints.length
-        ) {
-            accumulatedDelta = 0;
-            return;
+        /*
+         * Fallback for when the page is already almost exactly
+         * aligned to a snap point.
+         */
+        if (targetIndex === -1) {
+            const currentIndex = getClosestSnapIndex();
+            targetIndex = currentIndex + direction;
         }
 
         scrollToPoint(targetIndex);
@@ -193,6 +280,16 @@ console.log("[Wix Snap Scroll v5] file executing");
 
     function handleWheel(event) {
         if (snapPoints.length === 0) return;
+
+        const direction = event.deltaY > 0 ? 1 : -1;
+
+        /*
+         * Inside the FAQ, leave normal browser scrolling untouched.
+         */
+        if (shouldAllowNativeScroll(direction)) {
+            accumulatedDelta = 0;
+            return;
+        }
 
         if (locked) {
             event.preventDefault();
@@ -232,8 +329,7 @@ console.log("[Wix Snap Scroll v5] file executing");
                 );
             } else {
                 log(
-                    "No Wix sections found in this frame; " +
-                    "stopping this instance."
+                    "No Wix sections found in this frame; stopping."
                 );
             }
 
