@@ -1,4 +1,4 @@
-console.log("[Wix Snap Scroll v11] file executing");
+console.log("[Wix Snap Scroll v12] file executing");
 
 (() => {
     "use strict";
@@ -6,15 +6,12 @@ console.log("[Wix Snap Scroll v11] file executing");
     const CONFIG = {
         sectionSelector: '[data-testid="section-container"]',
 
-        /*
-         * Your 200vh hero is the second detected Wix section.
-         * JavaScript indexes begin at 0, so Section 2 = index 1.
-         */
-        splitSectionIndexes: [1],
+        // Your 200vh hero section:
+        splitSectionSelectors: [
+            "#comp-mrx3f3km"
+        ],
 
-        /*
-         * FAQ section that allows normal scrolling.
-         */
+        // Your normally scrollable FAQ section:
         freeSectionSelectors: [
             "#comp-mrxamx3r"
         ],
@@ -23,42 +20,134 @@ console.log("[Wix Snap Scroll v11] file executing");
         wheelResetDelay: 180,
         cooldown: 950,
         edgeTolerance: 20,
+
+        searchDelay: 400,
+        maxSearchAttempts: 75,
+
         debug: true
     };
 
-    const INSTANCE_KEY = "__WIX_SNAP_SCROLL_V11__";
-
-    if (window[INSTANCE_KEY]) {
-        console.log("[Wix Snap Scroll v11] duplicate instance ignored");
-        return;
-    }
+    let pageWindow = null;
+    let pageDocument = null;
 
     let sections = [];
     let snapPoints = [];
+
     let locked = false;
     let wheelDelta = 0;
     let wheelResetTimer = null;
-    let retryCount = 0;
-
-    const MAX_RETRIES = 30;
-    const RETRY_DELAY = 500;
+    let searchAttempts = 0;
 
     function log(...args) {
         if (CONFIG.debug) {
-            console.log("[Wix Snap Scroll v11]", ...args);
+            console.log("[Wix Snap Scroll v12]", ...args);
         }
     }
 
-    function getPageTop(element) {
-        return element.getBoundingClientRect().top + window.scrollY;
+    function safelyGetDocument(frameWindow) {
+        try {
+            return frameWindow.document;
+        } catch (error) {
+            return null;
+        }
     }
 
-    function getSections() {
-        return Array.from(
-            document.querySelectorAll(CONFIG.sectionSelector)
-        ).filter((section) => {
-            return section.getBoundingClientRect().height > 0;
+    function collectAccessibleWindows(rootWindow) {
+        const results = [];
+        const visited = new Set();
+
+        function visit(candidateWindow) {
+            if (!candidateWindow || visited.has(candidateWindow)) {
+                return;
+            }
+
+            visited.add(candidateWindow);
+
+            const candidateDocument =
+                safelyGetDocument(candidateWindow);
+
+            if (!candidateDocument) {
+                return;
+            }
+
+            results.push({
+                win: candidateWindow,
+                doc: candidateDocument
+            });
+
+            let frames;
+
+            try {
+                frames = candidateWindow.frames;
+            } catch (error) {
+                return;
+            }
+
+            for (let index = 0; index < frames.length; index++) {
+                try {
+                    visit(frames[index]);
+                } catch (error) {
+                    // Ignore inaccessible cross-origin frames.
+                }
+            }
+        }
+
+        visit(rootWindow);
+
+        try {
+            if (rootWindow.top && rootWindow.top !== rootWindow) {
+                visit(rootWindow.top);
+            }
+        } catch (error) {
+            // Top window may be cross-origin.
+        }
+
+        return results;
+    }
+
+    function findPageContext() {
+        const contexts = collectAccessibleWindows(window);
+
+        let bestMatch = null;
+        let highestSectionCount = 0;
+
+        contexts.forEach(({ win, doc }) => {
+            let sectionCount = 0;
+
+            try {
+                sectionCount = doc.querySelectorAll(
+                    CONFIG.sectionSelector
+                ).length;
+            } catch (error) {
+                return;
+            }
+
+            log(
+                "Checked document:",
+                doc.location?.href || "(unknown)",
+                `sections=${sectionCount}`
+            );
+
+            if (sectionCount > highestSectionCount) {
+                highestSectionCount = sectionCount;
+                bestMatch = { win, doc };
+            }
         });
+
+        if (!bestMatch || highestSectionCount < 2) {
+            return false;
+        }
+
+        pageWindow = bestMatch.win;
+        pageDocument = bestMatch.doc;
+
+        log(
+            "Found page context:",
+            pageDocument.location?.href || "(unknown)",
+            `with ${highestSectionCount} sections`
+        );
+
+        return true;
     }
 
     function matchesAnySelector(element, selectors) {
@@ -66,13 +155,13 @@ console.log("[Wix Snap Scroll v11] file executing");
             try {
                 return element.matches(selector);
             } catch (error) {
-                log("Invalid selector:", selector, error);
+                log("Invalid selector:", selector);
                 return false;
             }
         });
     }
 
-    function getSectionMode(section, sectionIndex) {
+    function getSectionMode(section) {
         if (
             matchesAnySelector(
                 section,
@@ -83,7 +172,10 @@ console.log("[Wix Snap Scroll v11] file executing");
         }
 
         if (
-            CONFIG.splitSectionIndexes.includes(sectionIndex)
+            matchesAnySelector(
+                section,
+                CONFIG.splitSectionSelectors
+            )
         ) {
             return "SPLIT";
         }
@@ -91,24 +183,47 @@ console.log("[Wix Snap Scroll v11] file executing");
         return "SNAP";
     }
 
+    function getPageTop(element) {
+        return (
+            element.getBoundingClientRect().top +
+            pageWindow.scrollY
+        );
+    }
+
+    function getSections() {
+        if (!pageDocument) {
+            return [];
+        }
+
+        return Array.from(
+            pageDocument.querySelectorAll(
+                CONFIG.sectionSelector
+            )
+        ).filter((section) => {
+            return section.getBoundingClientRect().height > 0;
+        });
+    }
+
     function buildSnapPoints() {
         sections = getSections();
 
-        const viewportHeight = window.innerHeight;
+        const viewportHeight = pageWindow.innerHeight;
         const points = [];
 
         sections.forEach((section, sectionIndex) => {
             const rect = section.getBoundingClientRect();
             const sectionTop = getPageTop(section);
             const sectionHeight = rect.height;
-            const mode = getSectionMode(section, sectionIndex);
+            const mode = getSectionMode(section);
 
             let partCount = 1;
 
             if (mode === "SPLIT") {
                 partCount = Math.max(
                     1,
-                    Math.round(sectionHeight / viewportHeight)
+                    Math.round(
+                        sectionHeight / viewportHeight
+                    )
                 );
             }
 
@@ -123,7 +238,9 @@ console.log("[Wix Snap Scroll v11] file executing");
             } else {
                 const maximumTop = Math.max(
                     sectionTop,
-                    sectionTop + sectionHeight - viewportHeight
+                    sectionTop +
+                        sectionHeight -
+                        viewportHeight
                 );
 
                 for (
@@ -132,11 +249,15 @@ console.log("[Wix Snap Scroll v11] file executing");
                     partIndex++
                 ) {
                     const requestedTop =
-                        sectionTop + viewportHeight * partIndex;
+                        sectionTop +
+                        viewportHeight * partIndex;
 
                     points.push({
                         top: Math.round(
-                            Math.min(requestedTop, maximumTop)
+                            Math.min(
+                                requestedTop,
+                                maximumTop
+                            )
                         ),
                         section,
                         sectionIndex,
@@ -158,11 +279,15 @@ console.log("[Wix Snap Scroll v11] file executing");
         snapPoints = points
             .sort((a, b) => a.top - b.top)
             .filter((point, index, list) => {
-                if (index === 0) return true;
+                if (index === 0) {
+                    return true;
+                }
 
-                return Math.abs(
-                    point.top - list[index - 1].top
-                ) > 10;
+                return (
+                    Math.abs(
+                        point.top - list[index - 1].top
+                    ) > 10
+                );
             });
 
         log(
@@ -185,9 +310,9 @@ console.log("[Wix Snap Scroll v11] file executing");
     }
 
     function getActiveFreeSection() {
-        const viewportTop = window.scrollY;
+        const viewportTop = pageWindow.scrollY;
         const viewportBottom =
-            viewportTop + window.innerHeight;
+            viewportTop + pageWindow.innerHeight;
 
         for (
             let sectionIndex = 0;
@@ -196,34 +321,28 @@ console.log("[Wix Snap Scroll v11] file executing");
         ) {
             const section = sections[sectionIndex];
 
-            if (
-                getSectionMode(section, sectionIndex) !== "FREE"
-            ) {
+            if (getSectionMode(section) !== "FREE") {
                 continue;
             }
 
             const sectionTop = getPageTop(section);
             const sectionHeight =
                 section.getBoundingClientRect().height;
-            const sectionBottom = sectionTop + sectionHeight;
+            const sectionBottom =
+                sectionTop + sectionHeight;
 
-            /*
-             * Consider the FAQ active whenever any meaningful
-             * portion of the viewport is inside it.
-             */
-            const intersectsViewport =
-                viewportBottom > sectionTop +
-                    CONFIG.edgeTolerance &&
-                viewportTop < sectionBottom -
-                    CONFIG.edgeTolerance;
+            const overlapsViewport =
+                viewportBottom >
+                    sectionTop + CONFIG.edgeTolerance &&
+                viewportTop <
+                    sectionBottom - CONFIG.edgeTolerance;
 
-            if (intersectsViewport) {
+            if (overlapsViewport) {
                 return {
                     section,
                     sectionIndex,
                     sectionTop,
-                    sectionBottom,
-                    sectionHeight
+                    sectionBottom
                 };
             }
         }
@@ -232,39 +351,32 @@ console.log("[Wix Snap Scroll v11] file executing");
     }
 
     function allowNativeFreeScroll(direction) {
-        const current = getActiveFreeSection();
+        const activeFreeSection =
+            getActiveFreeSection();
 
-        if (!current) {
+        if (!activeFreeSection) {
             return false;
         }
 
-        const viewportTop = window.scrollY;
+        const viewportTop = pageWindow.scrollY;
         const viewportBottom =
-            viewportTop + window.innerHeight;
+            viewportTop + pageWindow.innerHeight;
         const tolerance = CONFIG.edgeTolerance;
 
-        /*
-         * Scrolling down inside FAQ:
-         * allow native scrolling until its bottom reaches
-         * the bottom of the viewport.
-         */
         if (
             direction > 0 &&
             viewportBottom <
-                current.sectionBottom - tolerance
+                activeFreeSection.sectionBottom -
+                    tolerance
         ) {
             return true;
         }
 
-        /*
-         * Scrolling up inside FAQ:
-         * allow native scrolling until its top reaches
-         * the top of the viewport.
-         */
         if (
             direction < 0 &&
             viewportTop >
-                current.sectionTop + tolerance
+                activeFreeSection.sectionTop +
+                    tolerance
         ) {
             return true;
         }
@@ -273,13 +385,14 @@ console.log("[Wix Snap Scroll v11] file executing");
     }
 
     function findTargetSnapIndex(direction) {
-        const currentY = window.scrollY;
+        const currentY = pageWindow.scrollY;
         const tolerance = 24;
 
         if (direction > 0) {
             return snapPoints.findIndex(
                 (point) =>
-                    point.top > currentY + tolerance
+                    point.top >
+                    currentY + tolerance
             );
         }
 
@@ -300,8 +413,16 @@ console.log("[Wix Snap Scroll v11] file executing");
     }
 
     function scrollToSnapPoint(index) {
-        if (locked) return;
-        if (index < 0 || index >= snapPoints.length) return;
+        if (locked) {
+            return;
+        }
+
+        if (
+            index < 0 ||
+            index >= snapPoints.length
+        ) {
+            return;
+        }
 
         const target = snapPoints[index];
 
@@ -316,13 +437,13 @@ console.log("[Wix Snap Scroll v11] file executing");
             `y=${target.top}`
         );
 
-        window.scrollTo({
+        pageWindow.scrollTo({
             top: target.top,
             left: 0,
             behavior: "smooth"
         });
 
-        window.setTimeout(() => {
+        pageWindow.setTimeout(() => {
             locked = false;
         }, CONFIG.cooldown);
     }
@@ -342,15 +463,13 @@ console.log("[Wix Snap Scroll v11] file executing");
     }
 
     function handleWheel(event) {
-        if (snapPoints.length === 0) return;
+        if (snapPoints.length === 0) {
+            return;
+        }
 
         const direction =
             event.deltaY > 0 ? 1 : -1;
 
-        /*
-         * Native scrolling gets first priority while the
-         * viewport is inside the FAQ.
-         */
         if (allowNativeFreeScroll(direction)) {
             wheelDelta = 0;
             return;
@@ -363,11 +482,14 @@ console.log("[Wix Snap Scroll v11] file executing");
 
         wheelDelta += event.deltaY;
 
-        window.clearTimeout(wheelResetTimer);
+        pageWindow.clearTimeout(
+            wheelResetTimer
+        );
 
-        wheelResetTimer = window.setTimeout(() => {
-            wheelDelta = 0;
-        }, CONFIG.wheelResetDelay);
+        wheelResetTimer =
+            pageWindow.setTimeout(() => {
+                wheelDelta = 0;
+            }, CONFIG.wheelResetDelay);
 
         if (
             Math.abs(wheelDelta) <
@@ -381,68 +503,91 @@ console.log("[Wix Snap Scroll v11] file executing");
         move(wheelDelta > 0 ? 1 : -1);
     }
 
-    function initialize() {
-        const sectionCount = buildSnapPoints();
-
-        if (sectionCount < 2) {
-            retryCount++;
-
-            if (retryCount <= MAX_RETRIES) {
-                window.setTimeout(
-                    initialize,
-                    RETRY_DELAY
-                );
-            } else {
-                log(
-                    "No usable Wix sections found in this frame."
-                );
-            }
-
+    function handleAccordionClick(event) {
+        if (
+            !event.target.closest(
+                ".wixui-accordion, " +
+                ".wixui-accordion__item"
+            )
+        ) {
             return;
         }
 
-        window[INSTANCE_KEY] = true;
+        pageWindow.setTimeout(
+            buildSnapPoints,
+            600
+        );
+    }
 
-        window.addEventListener(
+    function install() {
+        if (
+            pageWindow.__WIX_SNAP_SCROLL_V12__
+        ) {
+            log("Already installed in page context");
+            return;
+        }
+
+        const sectionCount = buildSnapPoints();
+
+        if (sectionCount < 2) {
+            return;
+        }
+
+        pageWindow.__WIX_SNAP_SCROLL_V12__ =
+            true;
+
+        pageWindow.addEventListener(
             "wheel",
             handleWheel,
             { passive: false }
         );
 
-        window.addEventListener("resize", () => {
-            window.setTimeout(
-                buildSnapPoints,
-                150
-            );
-        });
-
-        /*
-         * FAQ accordion changes its height when opened.
-         */
-        document.addEventListener("click", (event) => {
-            if (
-                event.target.closest(
-                    ".wixui-accordion, " +
-                    ".wixui-accordion__item"
-                )
-            ) {
-                window.setTimeout(
+        pageWindow.addEventListener(
+            "resize",
+            () => {
+                pageWindow.setTimeout(
                     buildSnapPoints,
-                    600
+                    150
                 );
             }
-        });
+        );
+
+        pageDocument.addEventListener(
+            "click",
+            handleAccordionClick
+        );
 
         log("Snap scrolling initialized");
     }
 
-    if (document.readyState === "loading") {
-        document.addEventListener(
-            "DOMContentLoaded",
-            initialize,
-            { once: true }
-        );
-    } else {
-        initialize();
+    function searchAndInitialize() {
+        searchAttempts++;
+
+        if (findPageContext()) {
+            install();
+
+            if (
+                pageWindow
+                    ?.__WIX_SNAP_SCROLL_V12__
+            ) {
+                return;
+            }
+        }
+
+        if (
+            searchAttempts <
+            CONFIG.maxSearchAttempts
+        ) {
+            window.setTimeout(
+                searchAndInitialize,
+                CONFIG.searchDelay
+            );
+        } else {
+            log(
+                "Could not find a Wix document containing sections."
+            );
+        }
     }
+
+    searchAndInitialize();
 })();
