@@ -1,5 +1,34 @@
 console.log("[Wix Snap Scroll v2.7] file executing");
 
+(function () {
+    const VERSION = "Wix Snap Scroll v2.7";
+
+    const badge = document.createElement("div");
+    badge.textContent = VERSION;
+
+    badge.style.position = "fixed";
+    badge.style.top = "16px";
+    badge.style.right = "16px";
+    badge.style.padding = "10px 14px";
+    badge.style.background = "#111";
+    badge.style.color = "#fff";
+    badge.style.borderRadius = "10px";
+    badge.style.font = "600 14px system-ui";
+    badge.style.zIndex = "999999";
+    badge.style.pointerEvents = "none";
+    badge.style.opacity = "0.95";
+    badge.style.transition = "opacity .5s ease";
+
+    document.addEventListener("DOMContentLoaded", () => {
+        document.body.appendChild(badge);
+
+        setTimeout(() => {
+            badge.style.opacity = "0";
+            setTimeout(() => badge.remove(), 500);
+        }, 2500);
+    });
+})();
+
 (() => {
     "use strict";
 
