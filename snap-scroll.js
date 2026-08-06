@@ -1,51 +1,53 @@
-console.log("[Wix Snap Scroll] snap-scroll.js executing");
+console.log("[Wix Snap Scroll v5] file executing");
 
 (() => {
     "use strict";
 
     const CONFIG = {
         sectionSelector: '[data-testid="section-container"]',
-
-        // Minimum wheel/trackpad movement required.
         wheelThreshold: 30,
-
-        // Time during which additional wheel events are ignored.
         cooldown: 950,
-
-        enableKeyboard: true,
         debug: true
     };
+
+    // Stop the same script initializing twice in one window.
+    if (window.__WIX_SNAP_SCROLL_INITIALIZED__) {
+        console.log("[Wix Snap Scroll v5] duplicate instance ignored");
+        return;
+    }
 
     let snapPoints = [];
     let locked = false;
     let accumulatedDelta = 0;
-    let deltaResetTimer = null;
-    let initialized = false;
+    let resetTimer = null;
+    let retryCount = 0;
+
+    const MAX_RETRIES = 20;
+    const RETRY_DELAY = 500;
 
     function log(...args) {
         if (CONFIG.debug) {
-            console.log("[Wix Snap Scroll]", ...args);
+            console.log("[Wix Snap Scroll v5]", ...args);
         }
+    }
+
+    function getSections() {
+        return Array.from(
+            document.querySelectorAll(CONFIG.sectionSelector)
+        ).filter((section) => {
+            const rect = section.getBoundingClientRect();
+
+            return rect.height > 0;
+        });
     }
 
     function getAbsoluteTop(element) {
         return element.getBoundingClientRect().top + window.scrollY;
     }
 
-    function refreshSnapPoints() {
+    function buildSnapPoints() {
+        const sections = getSections();
         const viewportHeight = window.innerHeight;
-
-        const sections = Array.from(
-            document.querySelectorAll(CONFIG.sectionSelector)
-        ).filter((section) => {
-            const rect = section.getBoundingClientRect();
-
-            return (
-                rect.height > 0 &&
-                section.offsetParent !== null
-            );
-        });
-
         const points = [];
 
         sections.forEach((section, sectionIndex) => {
@@ -54,70 +56,81 @@ console.log("[Wix Snap Scroll] snap-scroll.js executing");
             const sectionHeight = rect.height;
 
             /*
-             * A normal 100vh section gets one point.
-             * A 200vh section gets two points.
-             * A 300vh section gets three points, etc.
+             * Examples:
+             * 100vh section -> 1 snap point
+             * 200vh section -> 2 snap points
+             * 300vh section -> 3 snap points
              */
-            const numberOfScreens = Math.max(
+            const partCount = Math.max(
                 1,
                 Math.round(sectionHeight / viewportHeight)
             );
 
-            for (let screenIndex = 0; screenIndex < numberOfScreens; screenIndex++) {
-                let pointTop = sectionTop + viewportHeight * screenIndex;
+            log(
+                `Section ${sectionIndex + 1}:`,
+                `height=${Math.round(sectionHeight)}px,`,
+                `viewport=${viewportHeight}px,`,
+                `parts=${partCount}`
+            );
 
-                /*
-                 * Never create a point beyond the section's final
-                 * full viewport position.
-                 */
+            for (let partIndex = 0; partIndex < partCount; partIndex++) {
                 const maximumTop = Math.max(
                     sectionTop,
                     sectionTop + sectionHeight - viewportHeight
                 );
 
-                pointTop = Math.min(pointTop, maximumTop);
+                const requestedTop =
+                    sectionTop + viewportHeight * partIndex;
+
+                const pointTop = Math.min(
+                    requestedTop,
+                    maximumTop
+                );
 
                 points.push({
                     top: Math.round(pointTop),
                     sectionIndex,
-                    screenIndex,
-                    section
+                    partIndex
                 });
             }
         });
 
-        /*
-         * Sort points and remove duplicates caused by rounding or
-         * sections slightly shorter than an exact viewport multiple.
-         */
+        // Sort and remove nearly identical positions.
         snapPoints = points
             .sort((a, b) => a.top - b.top)
-            .filter((point, index, array) => {
+            .filter((point, index, list) => {
                 if (index === 0) return true;
 
-                return Math.abs(point.top - array[index - 1].top) > 10;
+                return Math.abs(
+                    point.top - list[index - 1].top
+                ) > 10;
             });
 
-        log(`Found ${sections.length} Wix sections`);
         log(
-            "Snap points:",
+            `Built ${snapPoints.length} snap points from ` +
+            `${sections.length} Wix sections`
+        );
+
+        log(
             snapPoints.map((point, index) => ({
-                number: index + 1,
+                snapPoint: index + 1,
                 y: point.top,
                 wixSection: point.sectionIndex + 1,
-                part: point.screenIndex + 1
+                part: point.partIndex + 1
             }))
         );
+
+        return sections.length;
     }
 
-    function getCurrentSnapIndex(direction = 0) {
-        const currentY = window.scrollY;
-
+    function getClosestSnapIndex() {
         let closestIndex = 0;
         let closestDistance = Infinity;
 
         snapPoints.forEach((point, index) => {
-            const distance = Math.abs(currentY - point.top);
+            const distance = Math.abs(
+                window.scrollY - point.top
+            );
 
             if (distance < closestDistance) {
                 closestDistance = distance;
@@ -125,30 +138,10 @@ console.log("[Wix Snap Scroll] snap-scroll.js executing");
             }
         });
 
-        /*
-         * When the page is between two points, prefer the point
-         * matching the requested direction.
-         */
-        if (direction > 0) {
-            for (let i = 0; i < snapPoints.length; i++) {
-                if (snapPoints[i].top > currentY + 20) {
-                    return i - 1;
-                }
-            }
-        }
-
-        if (direction < 0) {
-            for (let i = snapPoints.length - 1; i >= 0; i--) {
-                if (snapPoints[i].top < currentY - 20) {
-                    return i + 1;
-                }
-            }
-        }
-
         return closestIndex;
     }
 
-    function scrollToSnapPoint(index) {
+    function scrollToPoint(index) {
         if (locked || snapPoints.length === 0) return;
 
         const targetIndex = Math.max(
@@ -164,10 +157,10 @@ console.log("[Wix Snap Scroll] snap-scroll.js executing");
         accumulatedDelta = 0;
 
         log(
-            `Scrolling to point ${targetIndex + 1}`,
-            `Y=${target.top}`,
-            `Wix section=${target.sectionIndex + 1}`,
-            `part=${target.screenIndex + 1}`
+            `Scrolling to snap ${targetIndex + 1}:`,
+            `section=${target.sectionIndex + 1},`,
+            `part=${target.partIndex + 1},`,
+            `y=${target.top}`
         );
 
         window.scrollTo({
@@ -178,14 +171,13 @@ console.log("[Wix Snap Scroll] snap-scroll.js executing");
 
         window.setTimeout(() => {
             locked = false;
-            log("Scroll unlocked");
         }, CONFIG.cooldown);
     }
 
     function move(direction) {
-        refreshSnapPoints();
+        buildSnapPoints();
 
-        const currentIndex = getCurrentSnapIndex(direction);
+        const currentIndex = getClosestSnapIndex();
         const targetIndex = currentIndex + direction;
 
         if (
@@ -196,7 +188,7 @@ console.log("[Wix Snap Scroll] snap-scroll.js executing");
             return;
         }
 
-        scrollToSnapPoint(targetIndex);
+        scrollToPoint(targetIndex);
     }
 
     function handleWheel(event) {
@@ -209,9 +201,9 @@ console.log("[Wix Snap Scroll] snap-scroll.js executing");
 
         accumulatedDelta += event.deltaY;
 
-        window.clearTimeout(deltaResetTimer);
+        window.clearTimeout(resetTimer);
 
-        deltaResetTimer = window.setTimeout(() => {
+        resetTimer = window.setTimeout(() => {
             accumulatedDelta = 0;
         }, 180);
 
@@ -224,84 +216,38 @@ console.log("[Wix Snap Scroll] snap-scroll.js executing");
 
         event.preventDefault();
 
-        const direction = accumulatedDelta > 0 ? 1 : -1;
-
-        move(direction);
-    }
-
-    function handleKeydown(event) {
-        if (!CONFIG.enableKeyboard || locked) return;
-
-        const activeElement = document.activeElement;
-        const tag = activeElement?.tagName?.toLowerCase();
-
-        if (
-            activeElement?.isContentEditable ||
-            tag === "input" ||
-            tag === "textarea" ||
-            tag === "select"
-        ) {
-            return;
-        }
-
-        if (
-            event.key === "ArrowDown" ||
-            event.key === "PageDown" ||
-            event.key === " "
-        ) {
-            event.preventDefault();
-            move(1);
-            return;
-        }
-
-        if (
-            event.key === "ArrowUp" ||
-            event.key === "PageUp"
-        ) {
-            event.preventDefault();
-            move(-1);
-            return;
-        }
-
-        if (event.key === "Home") {
-            event.preventDefault();
-            refreshSnapPoints();
-            scrollToSnapPoint(0);
-            return;
-        }
-
-        if (event.key === "End") {
-            event.preventDefault();
-            refreshSnapPoints();
-            scrollToSnapPoint(snapPoints.length - 1);
-        }
+        move(accumulatedDelta > 0 ? 1 : -1);
     }
 
     function initialize() {
-        refreshSnapPoints();
+        const sectionCount = buildSnapPoints();
 
-        if (snapPoints.length < 2) {
-            log("Not enough snap points. Retrying...");
-            window.setTimeout(initialize, 500);
+        if (sectionCount < 2) {
+            retryCount++;
+
+            if (retryCount <= MAX_RETRIES) {
+                window.setTimeout(
+                    initialize,
+                    RETRY_DELAY
+                );
+            } else {
+                log(
+                    "No Wix sections found in this frame; " +
+                    "stopping this instance."
+                );
+            }
+
             return;
         }
 
-        if (initialized) return;
-
-        initialized = true;
+        window.__WIX_SNAP_SCROLL_INITIALIZED__ = true;
 
         window.addEventListener("wheel", handleWheel, {
             passive: false
         });
 
-        window.addEventListener("keydown", handleKeydown);
-
         window.addEventListener("resize", () => {
-            window.setTimeout(refreshSnapPoints, 150);
-        });
-
-        window.addEventListener("load", () => {
-            window.setTimeout(refreshSnapPoints, 300);
+            window.setTimeout(buildSnapPoints, 150);
         });
 
         log("Snap scrolling initialized");
@@ -310,7 +256,8 @@ console.log("[Wix Snap Scroll] snap-scroll.js executing");
     if (document.readyState === "loading") {
         document.addEventListener(
             "DOMContentLoaded",
-            initialize
+            initialize,
+            { once: true }
         );
     } else {
         initialize();
