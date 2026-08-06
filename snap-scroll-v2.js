@@ -1,4 +1,4 @@
-console.log("[Wix Snap Scroll v2] file executing");
+console.log("[Wix Snap Scroll v2.1] file executing");
 
 (() => {
     "use strict";
@@ -11,23 +11,28 @@ console.log("[Wix Snap Scroll v2] file executing");
             "#comp-mrx3f3km"
         ],
 
-        // Your FAQ section, which should scroll normally.
+        // Your FAQ section, which scrolls normally.
         freeSections: [
             "#comp-mrxamx3r"
         ],
 
+        // Wheel and trackpad behavior.
         wheelThreshold: 30,
         resetDelay: 180,
-        scrollLockDuration: 900,
 
+        // Controlled scroll animation.
+        scrollDuration: 800,
+        scrollLockReleaseDelay: 80,
+
+        // Section detection.
         retryDelay: 400,
         maxRetries: 40,
-
         edgeTolerance: 20,
+
         debug: true
     };
 
-    const INSTANCE_KEY = "__WIX_SNAP_SCROLL_V2__";
+    const INSTANCE_KEY = "__WIX_SNAP_SCROLL_V21__";
 
     let pageWindow = null;
     let pageDocument = null;
@@ -40,12 +45,20 @@ console.log("[Wix Snap Scroll v2] file executing");
     let wheelResetTimer = null;
     let retries = 0;
 
+    let animationFrame = null;
+    let animationToken = 0;
+
     function log(...args) {
         if (CONFIG.debug) {
-            console.log("[Wix Snap Scroll v2]", ...args);
+            console.log("[Wix Snap Scroll v2.1]", ...args);
         }
     }
 
+    /*
+     * Wix may run the custom-code loader in a wrapper document.
+     * This searches accessible frames for the document that contains
+     * the actual Wix Studio sections.
+     */
     function getAccessibleDocuments() {
         const results = [];
         const visited = new Set();
@@ -68,11 +81,15 @@ console.log("[Wix Snap Scroll v2] file executing");
             results.push({ win, doc });
 
             try {
-                for (let index = 0; index < win.frames.length; index++) {
+                for (
+                    let index = 0;
+                    index < win.frames.length;
+                    index++
+                ) {
                     visit(win.frames[index]);
                 }
             } catch (error) {
-                // Ignore inaccessible frames.
+                // Ignore inaccessible cross-origin frames.
             }
         }
 
@@ -81,7 +98,7 @@ console.log("[Wix Snap Scroll v2] file executing");
         try {
             visit(window.top);
         } catch (error) {
-            // Top window may not be accessible.
+            // The top window may be inaccessible.
         }
 
         return results;
@@ -90,34 +107,36 @@ console.log("[Wix Snap Scroll v2] file executing");
     function findPageDocument() {
         const documents = getAccessibleDocuments();
 
-        let best = null;
-        let highestCount = 0;
+        let bestMatch = null;
+        let highestSectionCount = 0;
 
         documents.forEach(({ win, doc }) => {
-            let count = 0;
+            let sectionCount = 0;
 
             try {
-                count = doc.querySelectorAll(
+                sectionCount = doc.querySelectorAll(
                     CONFIG.sectionSelector
                 ).length;
             } catch (error) {
                 return;
             }
 
-            if (count > highestCount) {
-                highestCount = count;
-                best = { win, doc };
+            if (sectionCount > highestSectionCount) {
+                highestSectionCount = sectionCount;
+                bestMatch = { win, doc };
             }
         });
 
-        if (!best || highestCount < 2) {
+        if (!bestMatch || highestSectionCount < 2) {
             return false;
         }
 
-        pageWindow = best.win;
-        pageDocument = best.doc;
+        pageWindow = bestMatch.win;
+        pageDocument = bestMatch.doc;
 
-        log(`Found page document with ${highestCount} sections`);
+        log(
+            `Found page document with ${highestSectionCount} sections`
+        );
 
         return true;
     }
@@ -172,6 +191,18 @@ console.log("[Wix Snap Scroll v2] file executing");
         });
     }
 
+    /*
+     * Builds the positions the page may snap to.
+     *
+     * SNAP:
+     * One point at the top of the section.
+     *
+     * SPLIT:
+     * One point per viewport-height part.
+     *
+     * FREE:
+     * One point at the top, followed by native scrolling.
+     */
     function buildSnapPoints() {
         refreshSections();
 
@@ -249,9 +280,11 @@ console.log("[Wix Snap Scroll v2] file executing");
                     return true;
                 }
 
-                return Math.abs(
-                    point.top - list[index - 1].top
-                ) > 10;
+                return (
+                    Math.abs(
+                        point.top - list[index - 1].top
+                    ) > 10
+                );
             });
 
         log(
@@ -288,11 +321,13 @@ console.log("[Wix Snap Scroll v2] file executing");
                 section.getBoundingClientRect().height;
             const bottom = top + height;
 
-            const overlaps =
-                viewportBottom > top + CONFIG.edgeTolerance &&
-                viewportTop < bottom - CONFIG.edgeTolerance;
+            const overlapsViewport =
+                viewportBottom >
+                    top + CONFIG.edgeTolerance &&
+                viewportTop <
+                    bottom - CONFIG.edgeTolerance;
 
-            if (overlaps) {
+            if (overlapsViewport) {
                 return {
                     section,
                     index,
@@ -305,6 +340,10 @@ console.log("[Wix Snap Scroll v2] file executing");
         return null;
     }
 
+    /*
+     * Allows normal scrolling through the FAQ until the user reaches
+     * its upper or lower edge.
+     */
     function shouldFreeScroll(direction) {
         const freeSection = findActiveFreeSection();
 
@@ -319,7 +358,8 @@ console.log("[Wix Snap Scroll v2] file executing");
         if (
             direction > 0 &&
             viewportBottom <
-                freeSection.bottom - CONFIG.edgeTolerance
+                freeSection.bottom -
+                    CONFIG.edgeTolerance
         ) {
             return true;
         }
@@ -327,7 +367,8 @@ console.log("[Wix Snap Scroll v2] file executing");
         if (
             direction < 0 &&
             viewportTop >
-                freeSection.top + CONFIG.edgeTolerance
+                freeSection.top +
+                    CONFIG.edgeTolerance
         ) {
             return true;
         }
@@ -341,7 +382,9 @@ console.log("[Wix Snap Scroll v2] file executing");
 
         if (direction > 0) {
             return snapPoints.findIndex(
-                (point) => point.top > currentY + tolerance
+                (point) =>
+                    point.top >
+                    currentY + tolerance
             );
         }
 
@@ -361,7 +404,93 @@ console.log("[Wix Snap Scroll v2] file executing");
         return -1;
     }
 
-    function scrollToSnap(index) {
+    function easeInOutQuart(progress) {
+        if (progress < 0.5) {
+            return 8 * Math.pow(progress, 4);
+        }
+
+        return (
+            1 -
+            Math.pow(-2 * progress + 2, 4) / 2
+        );
+    }
+
+    /*
+     * Uses requestAnimationFrame rather than the browser's native
+     * smooth scrolling. This gives us a consistent destination and
+     * avoids native overshooting and correction behavior.
+     */
+    function animateScrollTo(targetY) {
+        if (animationFrame !== null) {
+            pageWindow.cancelAnimationFrame(
+                animationFrame
+            );
+        }
+
+        animationToken++;
+        const currentToken = animationToken;
+
+        const startY = pageWindow.scrollY;
+        const distance = targetY - startY;
+        const startTime =
+            pageWindow.performance.now();
+
+        return new Promise((resolve) => {
+            function frame(currentTime) {
+                if (currentToken !== animationToken) {
+                    resolve(false);
+                    return;
+                }
+
+                const elapsed =
+                    currentTime - startTime;
+
+                const progress = Math.min(
+                    elapsed / CONFIG.scrollDuration,
+                    1
+                );
+
+                const easedProgress =
+                    easeInOutQuart(progress);
+
+                pageWindow.scrollTo({
+                    top:
+                        startY +
+                        distance * easedProgress,
+                    left: 0,
+                    behavior: "auto"
+                });
+
+                if (progress < 1) {
+                    animationFrame =
+                        pageWindow.requestAnimationFrame(
+                            frame
+                        );
+
+                    return;
+                }
+
+                /*
+                 * End on the exact target pixel.
+                 */
+                pageWindow.scrollTo({
+                    top: targetY,
+                    left: 0,
+                    behavior: "auto"
+                });
+
+                animationFrame = null;
+                resolve(true);
+            }
+
+            animationFrame =
+                pageWindow.requestAnimationFrame(
+                    frame
+                );
+        });
+    }
+
+    async function scrollToSnap(index) {
         if (locked) {
             return;
         }
@@ -373,31 +502,86 @@ console.log("[Wix Snap Scroll v2] file executing");
             return;
         }
 
-        const target = snapPoints[index];
-
         locked = true;
         wheelTotal = 0;
 
+        /*
+         * Recalculate immediately before scrolling. Wix layouts may
+         * have shifted since the last wheel event.
+         */
+        buildSnapPoints();
+
+        let target = snapPoints[index];
+
+        if (!target) {
+            locked = false;
+            return;
+        }
+
+        const targetY = Math.round(target.top);
+
         log(
             `Scrolling to snap ${index + 1}`,
+            `targetY=${targetY}`,
             target
         );
 
-        pageWindow.scrollTo({
-            top: target.top,
-            left: 0,
-            behavior: "smooth"
-        });
+        try {
+            await animateScrollTo(targetY);
 
-        pageWindow.setTimeout(() => {
-            locked = false;
-        }, CONFIG.scrollLockDuration);
+            /*
+             * Recalculate after the animation because Wix accordions,
+             * images or responsive layout changes may have moved the
+             * destination while scrolling.
+             */
+            buildSnapPoints();
+
+            target = snapPoints[index];
+
+            if (target) {
+                const correctedY =
+                    Math.round(target.top);
+
+                const difference = Math.abs(
+                    pageWindow.scrollY -
+                    correctedY
+                );
+
+                /*
+                 * Ignore tiny subpixel differences. Only correct a
+                 * meaningful layout shift.
+                 */
+                if (difference > 3) {
+                    log(
+                        `Correcting final position by ` +
+                        `${Math.round(difference)}px`
+                    );
+
+                    pageWindow.scrollTo({
+                        top: correctedY,
+                        left: 0,
+                        behavior: "auto"
+                    });
+                }
+            }
+        } catch (error) {
+            console.error(
+                "[Wix Snap Scroll v2.1] " +
+                "Scroll animation failed",
+                error
+            );
+        } finally {
+            pageWindow.setTimeout(() => {
+                locked = false;
+            }, CONFIG.scrollLockReleaseDelay);
+        }
     }
 
     function move(direction) {
         buildSnapPoints();
 
-        const targetIndex = findTargetIndex(direction);
+        const targetIndex =
+            findTargetIndex(direction);
 
         if (targetIndex === -1) {
             wheelTotal = 0;
@@ -408,13 +592,25 @@ console.log("[Wix Snap Scroll v2] file executing");
     }
 
     function handleWheel(event) {
-        const direction = event.deltaY > 0 ? 1 : -1;
+        if (!event.deltaY) {
+            return;
+        }
 
+        const direction =
+            event.deltaY > 0 ? 1 : -1;
+
+        /*
+         * Native scrolling receives priority inside the FAQ.
+         */
         if (shouldFreeScroll(direction)) {
             wheelTotal = 0;
             return;
         }
 
+        /*
+         * Prevent trackpad momentum from moving the page during
+         * an active snap animation.
+         */
         if (locked) {
             event.preventDefault();
             return;
@@ -422,11 +618,14 @@ console.log("[Wix Snap Scroll v2] file executing");
 
         wheelTotal += event.deltaY;
 
-        pageWindow.clearTimeout(wheelResetTimer);
+        pageWindow.clearTimeout(
+            wheelResetTimer
+        );
 
-        wheelResetTimer = pageWindow.setTimeout(() => {
-            wheelTotal = 0;
-        }, CONFIG.resetDelay);
+        wheelResetTimer =
+            pageWindow.setTimeout(() => {
+                wheelTotal = 0;
+            }, CONFIG.resetDelay);
 
         if (
             Math.abs(wheelTotal) <
@@ -450,9 +649,12 @@ console.log("[Wix Snap Scroll v2] file executing");
             return;
         }
 
+        /*
+         * Wait for the accordion opening or closing animation.
+         */
         pageWindow.setTimeout(
             buildSnapPoints,
-            600
+            650
         );
     }
 
@@ -511,7 +713,9 @@ console.log("[Wix Snap Scroll v2] file executing");
                 CONFIG.retryDelay
             );
         } else {
-            log("Unable to find the Wix page document");
+            log(
+                "Unable to find the Wix page document"
+            );
         }
     }
 
