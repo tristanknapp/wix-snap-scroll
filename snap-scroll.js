@@ -1,4 +1,4 @@
-console.log("[Wix Snap Scroll v10] file executing");
+console.log("[Wix Snap Scroll v11] file executing");
 
 (() => {
     "use strict";
@@ -7,14 +7,13 @@ console.log("[Wix Snap Scroll v10] file executing");
         sectionSelector: '[data-testid="section-container"]',
 
         /*
-         * The first Wix section is 200vh and should behave
-         * like two screens.
+         * Your 200vh hero is the second detected Wix section.
+         * JavaScript indexes begin at 0, so Section 2 = index 1.
          */
-        splitSectionIndexes: [0],
+        splitSectionIndexes: [1],
 
         /*
-         * These sections allow normal scrolling internally.
-         * Your FAQ section:
+         * FAQ section that allows normal scrolling.
          */
         freeSectionSelectors: [
             "#comp-mrxamx3r"
@@ -23,14 +22,14 @@ console.log("[Wix Snap Scroll v10] file executing");
         wheelThreshold: 30,
         wheelResetDelay: 180,
         cooldown: 950,
-        edgeTolerance: 18,
+        edgeTolerance: 20,
         debug: true
     };
 
-    const INSTANCE_KEY = "__WIX_SNAP_SCROLL_V10__";
+    const INSTANCE_KEY = "__WIX_SNAP_SCROLL_V11__";
 
     if (window[INSTANCE_KEY]) {
-        console.log("[Wix Snap Scroll v10] duplicate instance ignored");
+        console.log("[Wix Snap Scroll v11] duplicate instance ignored");
         return;
     }
 
@@ -46,7 +45,7 @@ console.log("[Wix Snap Scroll v10] file executing");
 
     function log(...args) {
         if (CONFIG.debug) {
-            console.log("[Wix Snap Scroll v10]", ...args);
+            console.log("[Wix Snap Scroll v11]", ...args);
         }
     }
 
@@ -54,13 +53,11 @@ console.log("[Wix Snap Scroll v10] file executing");
         return element.getBoundingClientRect().top + window.scrollY;
     }
 
-    function getVisibleSections() {
+    function getSections() {
         return Array.from(
             document.querySelectorAll(CONFIG.sectionSelector)
         ).filter((section) => {
-            const rect = section.getBoundingClientRect();
-
-            return rect.height > 0;
+            return section.getBoundingClientRect().height > 0;
         });
     }
 
@@ -95,7 +92,7 @@ console.log("[Wix Snap Scroll v10] file executing");
     }
 
     function buildSnapPoints() {
-        sections = getVisibleSections();
+        sections = getSections();
 
         const viewportHeight = window.innerHeight;
         const points = [];
@@ -115,10 +112,6 @@ console.log("[Wix Snap Scroll v10] file executing");
                 );
             }
 
-            /*
-             * FREE sections only get a snap point at their top.
-             * Users then scroll naturally inside them.
-             */
             if (mode === "FREE") {
                 points.push({
                     top: Math.round(sectionTop),
@@ -191,22 +184,46 @@ console.log("[Wix Snap Scroll v10] file executing");
         return sections.length;
     }
 
-    function getSectionAtViewportCenter() {
-        const viewportCenter = window.innerHeight / 2;
+    function getActiveFreeSection() {
+        const viewportTop = window.scrollY;
+        const viewportBottom =
+            viewportTop + window.innerHeight;
 
-        for (let index = 0; index < sections.length; index++) {
-            const section = sections[index];
-            const rect = section.getBoundingClientRect();
+        for (
+            let sectionIndex = 0;
+            sectionIndex < sections.length;
+            sectionIndex++
+        ) {
+            const section = sections[sectionIndex];
 
             if (
-                rect.top <= viewportCenter &&
-                rect.bottom >= viewportCenter
+                getSectionMode(section, sectionIndex) !== "FREE"
             ) {
+                continue;
+            }
+
+            const sectionTop = getPageTop(section);
+            const sectionHeight =
+                section.getBoundingClientRect().height;
+            const sectionBottom = sectionTop + sectionHeight;
+
+            /*
+             * Consider the FAQ active whenever any meaningful
+             * portion of the viewport is inside it.
+             */
+            const intersectsViewport =
+                viewportBottom > sectionTop +
+                    CONFIG.edgeTolerance &&
+                viewportTop < sectionBottom -
+                    CONFIG.edgeTolerance;
+
+            if (intersectsViewport) {
                 return {
                     section,
-                    index,
-                    rect,
-                    mode: getSectionMode(section, index)
+                    sectionIndex,
+                    sectionTop,
+                    sectionBottom,
+                    sectionHeight
                 };
             }
         }
@@ -214,34 +231,40 @@ console.log("[Wix Snap Scroll v10] file executing");
         return null;
     }
 
-    function canScrollNaturallyInsideFreeSection(direction) {
-        const current = getSectionAtViewportCenter();
+    function allowNativeFreeScroll(direction) {
+        const current = getActiveFreeSection();
 
-        if (!current || current.mode !== "FREE") {
+        if (!current) {
             return false;
         }
 
-        const rect = current.rect;
+        const viewportTop = window.scrollY;
+        const viewportBottom =
+            viewportTop + window.innerHeight;
         const tolerance = CONFIG.edgeTolerance;
 
         /*
-         * While moving down, keep native scrolling enabled until
-         * the bottom of the free section reaches the viewport bottom.
+         * Scrolling down inside FAQ:
+         * allow native scrolling until its bottom reaches
+         * the bottom of the viewport.
          */
         if (
             direction > 0 &&
-            rect.bottom > window.innerHeight + tolerance
+            viewportBottom <
+                current.sectionBottom - tolerance
         ) {
             return true;
         }
 
         /*
-         * While moving up, keep native scrolling enabled until
-         * the top of the free section reaches the viewport top.
+         * Scrolling up inside FAQ:
+         * allow native scrolling until its top reaches
+         * the top of the viewport.
          */
         if (
             direction < 0 &&
-            rect.top < -tolerance
+            viewportTop >
+                current.sectionTop + tolerance
         ) {
             return true;
         }
@@ -249,13 +272,14 @@ console.log("[Wix Snap Scroll v10] file executing");
         return false;
     }
 
-    function getNextSnapIndex(direction) {
+    function findTargetSnapIndex(direction) {
         const currentY = window.scrollY;
         const tolerance = 24;
 
         if (direction > 0) {
             return snapPoints.findIndex(
-                (point) => point.top > currentY + tolerance
+                (point) =>
+                    point.top > currentY + tolerance
             );
         }
 
@@ -264,7 +288,10 @@ console.log("[Wix Snap Scroll v10] file executing");
             index >= 0;
             index--
         ) {
-            if (snapPoints[index].top < currentY - tolerance) {
+            if (
+                snapPoints[index].top <
+                currentY - tolerance
+            ) {
                 return index;
             }
         }
@@ -303,7 +330,8 @@ console.log("[Wix Snap Scroll v10] file executing");
     function move(direction) {
         buildSnapPoints();
 
-        const targetIndex = getNextSnapIndex(direction);
+        const targetIndex =
+            findTargetSnapIndex(direction);
 
         if (targetIndex === -1) {
             wheelDelta = 0;
@@ -316,13 +344,14 @@ console.log("[Wix Snap Scroll v10] file executing");
     function handleWheel(event) {
         if (snapPoints.length === 0) return;
 
-        const direction = event.deltaY > 0 ? 1 : -1;
+        const direction =
+            event.deltaY > 0 ? 1 : -1;
 
         /*
-         * Do not block normal scrolling while the user is inside
-         * the middle of a FREE section.
+         * Native scrolling gets first priority while the
+         * viewport is inside the FAQ.
          */
-        if (canScrollNaturallyInsideFreeSection(direction)) {
+        if (allowNativeFreeScroll(direction)) {
             wheelDelta = 0;
             return;
         }
@@ -350,51 +379,6 @@ console.log("[Wix Snap Scroll v10] file executing");
         event.preventDefault();
 
         move(wheelDelta > 0 ? 1 : -1);
-    }
-
-    function handleKeydown(event) {
-        if (locked) return;
-
-        const activeElement = document.activeElement;
-        const tagName =
-            activeElement?.tagName?.toLowerCase();
-
-        if (
-            activeElement?.isContentEditable ||
-            tagName === "input" ||
-            tagName === "textarea" ||
-            tagName === "select"
-        ) {
-            return;
-        }
-
-        const current = getSectionAtViewportCenter();
-
-        /*
-         * Let PageUp, PageDown and arrows scroll normally while
-         * the user is inside the middle of the FAQ.
-         */
-        if (current?.mode === "FREE") {
-            return;
-        }
-
-        if (
-            event.key === "ArrowDown" ||
-            event.key === "PageDown" ||
-            event.key === " "
-        ) {
-            event.preventDefault();
-            move(1);
-            return;
-        }
-
-        if (
-            event.key === "ArrowUp" ||
-            event.key === "PageUp"
-        ) {
-            event.preventDefault();
-            move(-1);
-        }
     }
 
     function initialize() {
@@ -425,25 +409,27 @@ console.log("[Wix Snap Scroll v10] file executing");
             { passive: false }
         );
 
-        window.addEventListener(
-            "keydown",
-            handleKeydown
-        );
-
         window.addEventListener("resize", () => {
-            window.setTimeout(buildSnapPoints, 150);
+            window.setTimeout(
+                buildSnapPoints,
+                150
+            );
         });
 
         /*
-         * Recalculate after FAQ accordion animations.
+         * FAQ accordion changes its height when opened.
          */
         document.addEventListener("click", (event) => {
             if (
                 event.target.closest(
-                    ".wixui-accordion, .wixui-accordion__item"
+                    ".wixui-accordion, " +
+                    ".wixui-accordion__item"
                 )
             ) {
-                window.setTimeout(buildSnapPoints, 500);
+                window.setTimeout(
+                    buildSnapPoints,
+                    600
+                );
             }
         });
 
