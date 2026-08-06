@@ -1,4 +1,4 @@
-console.log("🚀 SNAP SCROLL FILE LOADED");
+console.log("[Wix Snap Scroll] snap-scroll.js executing");
 
 (() => {
     "use strict";
