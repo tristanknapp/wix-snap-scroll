@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "Wix Snap Scroll v4.1.3";
+  
 
   const CONFIG = {
     mobileBreakpoint: 767,
