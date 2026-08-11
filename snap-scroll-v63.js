@@ -1,4 +1,4 @@
-console.log("[Wix Snap Scroll v4.1.3] file executing");
+// console.log("[Wix Snap Scroll v4.1.3] file executing");
 
 (() => {
   "use strict";
